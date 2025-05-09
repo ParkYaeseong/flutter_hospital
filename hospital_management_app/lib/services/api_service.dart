@@ -3,94 +3,146 @@ import 'package:dio/dio.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 class ApiService {
-  static const String apiBaseUrl = 'http://34.70.190.178/api/v1'; // Django API 기본 URL
+  // Django API 기본 URL
+  static const String apiBaseUrl =
+      'http://34.70.190.178/api/v1'; // ✅ 호스팅된 서버 주소
   final Dio _dio;
-
   final _secureStorage = const FlutterSecureStorage();
 
-  ApiService() : _dio = Dio(
-    BaseOptions(
-      baseUrl: apiBaseUrl,
-      connectTimeout: const Duration(seconds: 10),
-      receiveTimeout: const Duration(seconds: 15),
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-    ),
-  ) {
+  ApiService()
+    : _dio = Dio(
+        BaseOptions(
+          baseUrl: apiBaseUrl, // ✅ Dio 인스턴스 생성 시 baseUrl 설정
+          connectTimeout: const Duration(seconds: 10),
+          receiveTimeout: const Duration(seconds: 15),
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          // validateStatus: (status) => status != null, // 이 줄은 보통 기본값(status >= 200 && status < 300)을 사용하거나, 필요시 커스텀합니다.
+          // 현재 설정은 모든 상태 코드를 성공으로 간주하고 인터셉터에서 후처리하려는 의도로 보입니다.
+          // 이는 일반적인 방식은 아니지만, 특정 로직이 있다면 유지할 수 있습니다.
+          // 보통은 주석 처리하고 Dio의 기본 상태 코드 유효성 검사를 사용합니다.
+        ),
+      ) {
     _dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) async {
           String? accessToken = await _secureStorage.read(key: 'accessToken');
-
           if (accessToken != null && accessToken.isNotEmpty) {
             options.headers['Authorization'] = 'Bearer $accessToken';
-            print('Request with Token (ApiService): Bearer ${accessToken.length > 10 ? accessToken.substring(0, 10) : "short"}...');
+            // 토큰이 너무 길 경우 로깅 시 일부만 표시하는 것이 좋습니다.
+            // print('Request with Token: Bearer ${accessToken.length > 20 ? accessToken.substring(0, 20) : accessToken}...');
           } else {
-            print('Request without Token (ApiService): No access token for ${options.uri}');
+            // print('Request without Token for ${options.uri}');
           }
-
-          if (options.data != null) print('Request Data: ${options.data}');
+          print('API Request: ${options.method} ${options.uri}'); // 요청 URI 로깅
+          if (options.data != null) {
+            // print('Request Data: ${options.data}'); // 요청 데이터 로깅 (민감 정보 주의)
+          }
           return handler.next(options);
         },
         onResponse: (response, handler) {
-          print('API Response: ${response.statusCode} for ${response.requestOptions.uri}');
+          print(
+            'API Response: ${response.statusCode} for ${response.requestOptions.uri}',
+          );
+          print(
+            'Response Data: ${response.data}',
+          ); // ✅ 이 부분의 주석을 해제하여 실제 응답 데이터 확인
           return handler.next(response);
         },
         onError: (DioException e, handler) async {
-          print('API Error: ${e.requestOptions.uri} - ${e.response?.statusCode} ${e.message}');
+          print(
+            'API Error Interceptor: URI: ${e.requestOptions.uri}, Status: ${e.response?.statusCode}, Message: ${e.message}',
+          );
+          if (e.response?.data != null) {
+            // print('Error Data: ${e.response?.data}'); // 오류 응답 데이터 로깅
+          }
+
           if (e.response?.statusCode == 401) {
-            String? refreshToken; // TODO: 실제 리프레시 토큰 가져오는 로직
-            if (refreshToken != null) {
+            String? refreshToken = await _secureStorage.read(
+              key: 'refreshToken',
+            );
+            if (refreshToken != null && refreshToken.isNotEmpty) {
+              // refreshToken 유효성 추가
               try {
                 print('Attempting to refresh token...');
-                final refreshDio = Dio(BaseOptions(baseUrl: ApiService.apiBaseUrl));
+                // 토큰 갱신을 위한 새 Dio 인스턴스 (기존 인터셉터의 무한 루프 방지)
+                final refreshDio = Dio(
+                  BaseOptions(baseUrl: ApiService.apiBaseUrl),
+                );
                 final refreshResponse = await refreshDio.post(
-                  '/auth/token/refresh/',
+                  '/auth/token/refresh/', // ✅ 상대 경로 사용
                   data: {'refresh': refreshToken},
                 );
-                if (refreshResponse.statusCode == 200) {
+
+                if (refreshResponse.statusCode == 200 &&
+                    refreshResponse.data != null) {
                   final newAccessToken = refreshResponse.data['access'];
-                  // await _secureStorage.write(key: 'accessToken', value: newAccessToken);
-                  // TODO: AuthProvider 등 상태 관리자에 새 토큰 업데이트
-                  print('Token refreshed. Retrying original request.');
-                  e.requestOptions.headers['Authorization'] = 'Bearer $newAccessToken';
-                  final retriedResponse = await _dio.fetch(e.requestOptions);
-                  return handler.resolve(retriedResponse);
+                  if (newAccessToken is String) {
+                    // 타입 확인 추가
+                    await _secureStorage.write(
+                      key: 'accessToken',
+                      value: newAccessToken,
+                    );
+                    print(
+                      'Token refreshed successfully. Retrying original request.',
+                    );
+
+                    // 원래 요청 옵션에 새 토큰 설정 및 재시도
+                    e.requestOptions.headers['Authorization'] =
+                        'Bearer $newAccessToken';
+                    final retriedResponse = await _dio.fetch(e.requestOptions);
+                    return handler.resolve(retriedResponse);
+                  } else {
+                    print(
+                      'Token refresh response did not contain a valid access token.',
+                    );
+                    await _logoutUser(); // 로그인 정보 삭제 및 로그아웃 처리
+                  }
+                } else {
+                  print(
+                    'Token refresh API call failed with status: ${refreshResponse.statusCode}',
+                  );
+                  await _logoutUser();
                 }
               } catch (refreshError) {
                 print('Failed to refresh token: $refreshError');
-                // TODO: AuthProvider 등에서 logout 처리
+                await _logoutUser();
               }
+            } else {
+              print('No refresh token available. Logging out.');
+              await _logoutUser();
             }
           }
+          // 401 오류가 아니거나 토큰 갱신 실패 시, 원래 오류를 그대로 전달
           return handler.next(e);
         },
       ),
     );
   }
 
-  // --- 로그인 API 호출 함수 ---
-  Future<Response> loginUser(String username, String password) async {
-    try {
-      final response = await _dio.post(
-        '/auth/token/',
-        data: {'username': username, 'password': password},
-      );
-      // 로그인 성공 시 토큰 저장 로직은 AuthProvider에서 처리하는 것이 더 일반적일 수 있음
-      // 또는 여기서 바로 저장하고 AuthProvider는 상태만 업데이트
-      // if (response.statusCode == 200 && response.data != null) {
-      //   await _secureStorage.write(key: 'accessToken', value: response.data['access']);
-      //   await _secureStorage.write(key: 'refreshToken', value: response.data['refresh']);
-      // }
-      return response;
-    } on DioException catch (e) {
-      rethrow;
-    }
+  // 로그아웃 처리 (토큰 삭제 및 필요시 Provider 상태 변경 알림)
+  Future<void> _logoutUser() async {
+    await _secureStorage.delete(key: 'accessToken');
+    await _secureStorage.delete(key: 'refreshToken');
+    // TODO: AuthProvider 등을 통해 앱 전체에 로그아웃 상태 전파
+    // 예: context.read<AuthProvider>().logout(); (ApiService에서는 context 직접 사용 불가)
+    // 필요하다면, 특정 예외를 발생시켜 호출부에서 로그아웃 처리하도록 유도
+    print(
+      "User logged out due to token refresh failure or missing refresh token.",
+    );
   }
 
-  // --- !!! 회원가입 API 호출 함수 추가 !!! ---
+  // --- API 호출 함수들 ---
+
+  Future<Response> loginUser(String username, String password) async {
+    return await _dio.post(
+      '/auth/token/', // ✅ 상대 경로 사용
+      data: {'username': username, 'password': password},
+    );
+  }
+
   Future<Response> registerUser({
     required String username,
     required String email,
@@ -98,158 +150,116 @@ class ApiService {
     required String password2,
     String? firstName,
     String? lastName,
-    required String role, // 'PATIENT' 또는 'CLINICIAN'
+    required String role,
   }) async {
-    try {
-      final response = await _dio.post(
-        '/users/register/', // Django users 앱의 UserRegistrationView 엔드포인트
-        data: {
-          'username': username,
-          'email': email,
-          'password': password,
-          'password2': password2,
-          'first_name': firstName ?? '',
-          'last_name': lastName ?? '',
-          'role': role,
-        },
-      );
-      return response;
-    } on DioException catch (e) {
-      // DioException은 response, error, type 등의 정보를 포함하여 더 자세한 오류 분석 가능
-      print('Registration Error: ${e.response?.statusCode} - ${e.response?.data ?? e.message}');
-      rethrow; // 호출한 곳에서 상세 오류를 처리할 수 있도록 예외를 다시 던짐
-    }
+    return await _dio.post(
+      '/users/register/', // ✅ 상대 경로 사용
+      data: {
+        'username': username,
+        'email': email,
+        'password': password,
+        'password2': password2,
+        'first_name': firstName ?? '',
+        'last_name': lastName ?? '',
+        'role': role,
+      },
+    );
   }
 
-  // --- 현재 사용자 정보 조회 API 호출 함수 ---
-  // 중복 선언되었던 함수 중 하나를 남김
   Future<Response> getCurrentUserProfile() async {
+    return await _dio.get('/users/me/'); // ✅ 상대 경로 사용
+  }
+
+  // --- 병실 관리 API 함수 ---
+  Future<Response<dynamic>> getRoomList() async {
+    const String endpoint =
+        '/rooms/rooms'; // ✅ 올바른 상대 경로: /api/v1/rooms/ 에서 /api/v1은 baseUrl에 포함됨
     try {
-      // Django users 앱의 /users/me/ 엔드포인트 가정
-      final response = await _dio.get('/users/me/');
+      print('ApiService: Requesting room list from endpoint: $endpoint');
+      // _dio.options.baseUrl에 apiBaseUrl이 설정되어 있으므로, 상대 경로만 사용
+      final response = await _dio.get(endpoint);
       return response;
-    } on DioException catch (e) {
-      print('Get User Profile Error: ${e.response?.data ?? e.message}');
+    } catch (e) {
+      print('ApiService: Error in getRoomList for endpoint $endpoint: $e');
       rethrow;
     }
   }
 
-  // --- 환자 대시보드 데이터 조회 API ---
-  Future<Response> getPatientDashboardData(String patientId) async {
-    try {
-      // Django의 apps.cdss_api (가칭) 또는 다른 앱의 엔드포인트
-      final response = await _dio.get('/patients/$patientId/dashboard/');
-      return response;
-    } on DioException catch (e) {
-      print(
-        'Get Patient Dashboard Error for $patientId: ${e.response?.data ?? e.message}',
-      );
-      rethrow;
-    }
-  }
-
-  // --- CT 진단 요청 생성 API ---
-  Future<Response> createCtDiagnosisRequest(
-    String patientProfileId,
-    String sopInstanceUid,
-  ) async {
-    try {
-      final response = await _dio.post(
-        '/diagnosis/requests/', // Django diagnosis 앱의 ViewSet 엔드포인트
-        data: {
-          'patient':
-              patientProfileId, // PatientProfile 모델의 PK (User ID와 다를 수 있음)
-          'sop_instance_uid': sopInstanceUid,
-        },
-      );
-      return response;
-    } on DioException catch (e) {
-      print(
-        'Create CT Diagnosis Request Error: ${e.response?.data ?? e.message}',
-      );
-      rethrow;
-    }
-  }
-
-  // --- (예시) 환자 목록 조회 API ---
-  Future<Response> getPatientList() async {
-    try {
-      // Django patients 앱의 PatientProfileViewSet 엔드포인트 가정
-      final response = await _dio.get('/patients/profiles/');
-      return response;
-    } on DioException catch (e) {
-      print('Get Patient List Error: ${e.response?.data ?? e.message}');
-      rethrow;
-    }
-  }
-
-  // --- (예시) 특정 환자의 CT 스터디 목록 조회 API (Weasis 연동용) ---
-  Future<Response> getCtStudiesForPatient(String patientProfileId) async {
-    try {
-      // 이 API는 Django에서 Orthanc를 조회하여 StudyInstanceUID, SeriesInstanceUID 등을 반환해야 함
-      final response = await _dio.get(
-        '/diagnosis/requests/?patient=${patientProfileId}',
-      ); // 필터링 파라미터는 Django API 설계에 따름
-      return response;
-    } on DioException catch (e) {
-      print(
-        'Get CT Studies Error for patient $patientProfileId: ${e.response?.data ?? e.message}',
-      );
-      rethrow;
-    }
-  }
-
- // --- !!! 병실 관리 API 함수 추가 !!! ---
-  // 1. 병실 목록 조회
-  Future<Response> getRoomList({Map<String, dynamic>? queryParams}) async {
-    try {
-      final response = await _dio.get('/rooms/', queryParameters: queryParams); // Django rooms 앱의 RoomViewSet 엔드포인트
-      return response;
-    } on DioException catch (e) {
-      print('Get Room List Error: ${e.response?.data ?? e.message}');
-      rethrow;
-    }
-  }
-
-  // 2. 특정 병실 상세 정보 조회 (침상 목록 포함)
   Future<Response> getRoomDetails(String roomId) async {
-    try {
-      final response = await _dio.get('/rooms/rooms/$roomId/');
-      return response;
-    } on DioException catch (e) {
-      print('Get Room Details Error for $roomId: ${e.response?.data ?? e.message}');
-      rethrow;
-    }
+    final String endpoint = '/rooms/rooms/$roomId/'; // ✅ 상대 경로 사용
+    return await _dio.get(endpoint);
   }
 
-  // 3. 침상에 환자 배정 (BedViewSet의 update (PATCH) 사용 가정)
-  Future<Response> assignPatientToBed(String bedId, String patientProfileId) async {
-    try {
-      final response = await _dio.patch(
-        '/rooms/beds/$bedId/', // Django rooms 앱의 BedViewSet 상세 엔드포인트
-        data: {'patient_id': patientProfileId}, // patient_id 필드를 통해 환자 배정
-      );
-      return response;
-    } on DioException catch (e) {
-      print('Assign Patient to Bed Error for Bed $bedId: ${e.response?.data ?? e.message}');
-      rethrow;
-    }
+  Future<Response> createRoom({
+    required String roomNumber,
+    int? floor,
+    required String roomType,
+    required int capacity,
+    String? description,
+  }) async {
+    const String endpoint = '/rooms/rooms/'; // ✅ 상대 경로 사용
+    return await _dio.post(
+      endpoint,
+      data: {
+        'room_number': roomNumber,
+        'floor': floor,
+        'room_type': roomType, // Django RoomCreateUpdateSerializer의 필드명과 일치해야 함
+        'capacity': capacity,
+        'description': description ?? '',
+      },
+    );
   }
 
-  // 4. 침상에서 환자 퇴실 (BedViewSet의 update (PATCH) 사용 가정 - patient_id를 null로)
-  Future<Response> dischargePatientFromBed(String bedId) async {
-    try {
-      final response = await _dio.patch(
-        '/rooms/beds/$bedId/',
-        data: {'patient_id': null}, // patient_id를 null로 보내 퇴실 처리
-      );
-      return response;
-    } on DioException catch (e) {
-      print('Discharge Patient from Bed Error for Bed $bedId: ${e.response?.data ?? e.message}');
-      rethrow;
-    }
+  Future<Response> assignPatientToBed(String roomId, String bedId, String patientProfileId) async {
+    // ✅ 수정된 엔드포인트: Django Nested Router 설정을 정확히 반영
+    final String endpoint = '/rooms/rooms/$roomId/beds/$bedId/'; // "rooms"가 두 번, bedId 포함
+
+    print('ApiService: Assigning patient $patientProfileId to bed $bedId in room $roomId at endpoint: $endpoint');
+    return await _dio.patch(
+      endpoint,
+      data: {'patient_id': patientProfileId}, // BedSerializer의 patient_id (source='patient') 필드 사용
+    );
   }
 
-  // TODO: 새 병실/침상 생성, 정보 수정 등 필요한 API 함수 추가
-  // ------------------------------------
+  Future<Response> dischargePatientFromBed(String roomId, String bedId) async {
+    // ✅ 수정된 엔드포인트: Django Nested Router 설정을 정확히 반영
+    final String endpoint = '/rooms/rooms/$roomId/beds/$bedId/'; // "rooms"가 두 번, bedId 포함
+     print('ApiService: Discharging patient from bed $bedId in room $roomId at endpoint: $endpoint');
+    return await _dio.patch(
+      endpoint,
+      data: {'patient_id': null}, // patient_id를 null로 보내 환자 해제
+    );
+  }
+
+  Future<Response> createBedInRoom({
+    required String roomId, // 이 침상이 속할 병실의 ID (예: "2")
+    required String bedNumber,
+    String? notes,
+    String? patientId, // 새로 생성되는 침상에 바로 환자를 배정할 경우 (PatientProfile의 PK)
+  }) async {
+    // ✅ 수정된 엔드포인트: Django Nested Router 설정을 정확히 반영
+    final String endpoint = '/rooms/rooms/$roomId/beds/'; // "rooms"가 두 번 들어갑니다.
+
+    print('ApiService: Creating bed in room $roomId at endpoint: $endpoint with patientId: $patientId');
+    return await _dio.post(
+      endpoint,
+      data: {
+        'bed_number': bedNumber,
+        'notes': notes ?? '',
+        // patientId는 PatientProfile의 PK여야 하며, BedSerializer의 'patient_id' 필드가 이를 처리합니다.
+        'patient_id': patientId,
+      },
+    );
+  }
+
+  Future<Response> getCtStudiesForPatient(String patientProfilePk) async {
+    // Django URL이 /api/v1/patients/{patient_profile_pk}/ct-studies/ 형태일 경우 (Nested Router 사용)
+    final String endpoint =
+        '/patients/$patientProfilePk/ct-studies/'; // ✅ 상대 경로 사용
+    // 만약 /api/v1/pacs/ct-studies/?patient_id={patient_profile_pk} 형태라면 아래처럼 수정
+    // const String endpoint = '/pacs/ct-studies/';
+    // return await _dio.get(endpoint, queryParameters: {'patient_id': patientProfilePk});
+    print('ApiService: Requesting CT studies for patient $patientProfilePk from: $endpoint'); // 로그 추가
+    return await _dio.get(endpoint);
+  }
 }

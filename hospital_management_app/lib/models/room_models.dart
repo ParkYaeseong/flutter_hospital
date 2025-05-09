@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart'; // 인증 상태 확인용
 import '../services/api_service.dart';   // API 서비스 호출용
-import '../models/room_models.dart';     // Room, Bed 모델 사용
 // import 'room_detail_screen.dart';    // 상세 화면 (다음 단계에서 생성)
 
 class SimplePatient {
@@ -19,18 +18,16 @@ class SimplePatient {
     this.lastName,
   });
 
-  factory SimplePatient.fromJson(Map<String, dynamic> json) {
-    // Django PatientProfileSerializer에서 'user' 필드가 UserSerializer로 중첩되어 있고,
-    // 그 안에 id, username, first_name, last_name이 있다고 가정합니다.
-    // 또는 PatientProfileSerializer가 직접 해당 필드들을 포함할 수도 있습니다.
-    // API 응답 구조에 따라 이 부분을 정확히 맞춰야 합니다.
-    final userJson = json['user'] as Map<String, dynamic>?; // PatientProfile.user 접근
+  factory SimplePatient.fromJson(Map<String, dynamic> patientProfileJson) {
+    // patientProfileJson은 PatientProfileSerializer의 결과입니다.
+    // PatientProfileSerializer가 'user'라는 키로 User 정보를 중첩한다고 가정합니다.
+    final userJson = patientProfileJson['user'] as Map<String, dynamic>?;
 
     return SimplePatient(
-      id: userJson?['id']?.toString() ?? json['id']?.toString() ?? 'N/A_PatientID',
-      username: userJson?['username'] ?? json['username'] ?? 'Unknown Patient', // username이 user 객체 안에 있을 경우
-      firstName: userJson?['first_name'],
-      lastName: userJson?['last_name'],
+      id: userJson?['id']?.toString() ?? patientProfileJson['pk']?.toString() ?? 'N/A_PatientID',
+      username: userJson?['username'] as String? ?? 'Unknown Username',
+      firstName: userJson?['first_name'] as String?,
+      lastName: userJson?['last_name'] as String?,
     );
   }
 
@@ -67,13 +64,14 @@ class Bed {
   // JSON 데이터를 Bed 객체로 변환하는 팩토리 생성자
   factory Bed.fromJson(Map<String, dynamic> json) {
     return Bed(
+      
       id: json['id']?.toString() ?? 'N/A_BedID', // Django API 응답의 Bed ID 필드명 확인
-      bedNumber: json['bed_number'] ?? 'N/A',
+      bedNumber: json['bed_number'] as String? ?? 'N/A',
       patient: json['patient'] != null
           ? SimplePatient.fromJson(json['patient'] as Map<String, dynamic>)
           : null,
       isOccupied: json['is_occupied'] ?? false,
-      notes: json['notes'],
+      notes: json['notes'] as String?,
       roomId: json['room']?.toString() ?? 'N/A_RoomID', // Django API 응답에서 Room ID 필드명 확인
     );
   }
