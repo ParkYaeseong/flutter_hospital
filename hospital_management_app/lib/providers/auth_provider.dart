@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../services/api_service.dart'; // 경로 확인
+import 'dart:convert';
 
 class AuthProvider with ChangeNotifier {
   final ApiService _apiService = ApiService();
@@ -16,7 +17,7 @@ class AuthProvider with ChangeNotifier {
   String? _errorMessage;
   bool _isInitialLoading = true; // 앱 시작 시 토큰 로드 중인지 여부
 
-  String? get accessToken => _accessToken;
+  String? get token => _accessToken;
   String? get refreshToken => _refreshToken;
   Map<String, dynamic>? get user => _user;
   bool get isLoading => _isLoading;
@@ -87,7 +88,6 @@ class AuthProvider with ChangeNotifier {
         await _secureStorage.write(key: 'refreshToken', value: _refreshToken);
         print("AuthProvider: Tokens saved to secure storage.");
 
-
         await fetchUserProfile(); // 로그인 성공 후 사용자 프로필 정보 가져오기
         _isLoading = false;
         notifyListeners();
@@ -124,48 +124,43 @@ class AuthProvider with ChangeNotifier {
   }
 
   Future<void> fetchUserProfile() async {
-    // ApiService의 인터셉터에서 이미 토큰을 헤더에 추가하므로 별도 전달 X
     if (!isAuthenticated) {
       print("AuthProvider: Not authenticated, cannot fetch user profile.");
       _user = null;
       notifyListeners();
       return;
     }
+
     try {
-      final response =
-          await _apiService.getCurrentUserProfile(); // ApiService의 함수 호출
-      if (response.statusCode == 200) {
-        _user = response.data; // 사용자 정보(Map<String, dynamic>) 저장
-        print(
-          "AuthProvider: User profile fetched successfully: ${_user?['username']}",
-        );
-      } else {
-        // 이 경우는 인터셉터에서 401 처리 후에도 발생 가능 (예: 서버 로직 오류)
-        print(
-          "AuthProvider: Failed to fetch user profile, status: ${response.statusCode}",
-        );
-        _user = null;
+      final token = _accessToken;
+      if (token != null) {
+        final parts = token.split('.');
+        if (parts.length == 3) {
+          final payload = parts[1];
+          final normalized = base64.normalize(payload);
+          final decoded = utf8.decode(base64Url.decode(normalized));
+          final data = json.decode(decoded);
+
+          // ✅ 여기서 명시적으로 'id'로 매핑해줘야 함
+          _user = {
+            'id': data['user_id'], // flutter 전반에서 ['id']로 쓰고 있으니 이 필드는 필수
+            'user_id': data['user_id'],
+            'username': data['username'] ?? '', // username이 있으면 사용하고, 없으면 빈 문자열
+            // 필요 시 다른 필드도 추가
+          };
+
+          print("AuthProvider: User ID from token: ${_user?['id']}");
+        } else {
+          print("AuthProvider: Invalid JWT token format.");
+          _user = null;
+        }
       }
-    } on DioException catch (e) {
-      print(
-        "AuthProvider: Error fetching user profile (DioException): ${e.response?.data ?? e.message}",
-      );
-      if (e.response?.statusCode == 401) {
-        // 토큰이 만료되었거나 유효하지 않은 경우
-        print(
-          "AuthProvider: User profile fetch returned 401. Attempting token refresh or logging out.",
-        );
-        // 인터셉터에서 토큰 갱신 시도가 있었을 것이므로, 여기서 또 호출하기보다는
-        // 인터셉터에서 갱신 실패 시 logout을 호출하도록 하거나, 여기서 logout 처리.
-        // 여기서는 logout() 을 호출하여 토큰을 정리합니다.
-        await logout(); // 인증 실패 시 로그아웃
-      }
-      _user = null;
     } catch (e) {
-      print("AuthProvider: Unknown error fetching user profile: $e");
+      print("AuthProvider: Failed to decode token: $e");
       _user = null;
     }
-    notifyListeners(); // 사용자 정보 변경 알림
+
+    notifyListeners();
   }
 
   Future<void> logout() async {
@@ -221,7 +216,9 @@ class AuthProvider with ChangeNotifier {
         return true;
       }
     } on DioException catch (e) {
-      print("AuthProvider: Failed to refresh access token: ${e.response?.data ?? e.message}");
+      print(
+        "AuthProvider: Failed to refresh access token: ${e.response?.data ?? e.message}",
+      );
       await logout(); // 리프레시 실패 시 로그아웃
     } catch (e) {
       print("AuthProvider: Unknown error refreshing token: $e");
@@ -257,8 +254,11 @@ class AuthProvider with ChangeNotifier {
         role: role,
       );
 
-      if (response.statusCode == 201) { // 회원가입 성공 (HTTP 201 Created)
-        print("AuthProvider: Registration successful for ${response.data?['username']}");
+      if (response.statusCode == 201) {
+        // 회원가입 성공 (HTTP 201 Created)
+        print(
+          "AuthProvider: Registration successful for ${response.data?['username']}",
+        );
         _isLoading = false;
         notifyListeners();
         // 회원가입 성공 후 바로 로그인 시도 또는 로그인 페이지로 안내
@@ -282,7 +282,7 @@ class AuthProvider with ChangeNotifier {
         } else if (errors.containsKey('role')) {
           specificError = '역할: ${errors['role'][0]}';
         } else if (errors.containsKey('detail')) {
-            specificError = errors['detail'];
+          specificError = errors['detail'];
         }
         _errorMessage = "회원가입 실패: $specificError";
       } else {

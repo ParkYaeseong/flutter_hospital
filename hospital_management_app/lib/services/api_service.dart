@@ -1,6 +1,8 @@
 // lib/services/api_service.dart
+import 'dart:convert'; // 🔥 base64 decode용
 import 'package:dio/dio.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import '../models/chat_user.dart';
 
 class ApiService {
   // Django API 기본 URL
@@ -137,10 +139,15 @@ class ApiService {
   // --- API 호출 함수들 ---
 
   Future<Response> loginUser(String username, String password) async {
-    return await _dio.post(
-      '/auth/token/', // ✅ 상대 경로 사용
-      data: {'username': username, 'password': password},
-    );
+    try {
+      final response = await _dio.post(
+        '/auth/token/',
+        data: {'username': username, 'password': password},
+      );
+      return response;
+    } on DioException catch (e) {
+      rethrow;
+    }
   }
 
   Future<Response> registerUser({
@@ -152,18 +159,26 @@ class ApiService {
     String? lastName,
     required String role,
   }) async {
-    return await _dio.post(
-      '/users/register/', // ✅ 상대 경로 사용
-      data: {
-        'username': username,
-        'email': email,
-        'password': password,
-        'password2': password2,
-        'first_name': firstName ?? '',
-        'last_name': lastName ?? '',
-        'role': role,
-      },
-    );
+    try {
+      final response = await _dio.post(
+        '/users/register/',
+        data: {
+          'username': username,
+          'email': email,
+          'password': password,
+          'password2': password2,
+          'first_name': firstName ?? '',
+          'last_name': lastName ?? '',
+          'role': role,
+        },
+      );
+      return response;
+    } on DioException catch (e) {
+      print(
+        'Registration Error: ${e.response?.statusCode} - ${e.response?.data ?? e.message}',
+      );
+      rethrow;
+    }
   }
 
   Future<Response> getCurrentUserProfile() async {
@@ -181,6 +196,46 @@ class ApiService {
       return response;
     } catch (e) {
       print('ApiService: Error in getRoomList for endpoint $endpoint: $e');
+      rethrow;
+    }
+  }
+
+  Future<Response> getPatientDashboardData(String patientId) async {
+    try {
+      final response = await _dio.get('/patients/$patientId/dashboard/');
+      return response;
+    } on DioException catch (e) {
+      print(
+        'Get Patient Dashboard Error for $patientId: ${e.response?.data ?? e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  Future<Response> createCtDiagnosisRequest(
+    String patientProfileId,
+    String sopInstanceUid,
+  ) async {
+    try {
+      final response = await _dio.post(
+        '/diagnosis/requests/',
+        data: {'patient': patientProfileId, 'sop_instance_uid': sopInstanceUid},
+      );
+      return response;
+    } on DioException catch (e) {
+      print(
+        'Create CT Diagnosis Request Error: ${e.response?.data ?? e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  Future<Response> getPatientList() async {
+    try {
+      final response = await _dio.get('/patients/profiles/');
+      return response;
+    } on DioException catch (e) {
+      print('Get Patient List Error: ${e.response?.data ?? e.message}');
       rethrow;
     }
   }
@@ -210,21 +265,71 @@ class ApiService {
     );
   }
 
-  Future<Response> assignPatientToBed(String roomId, String bedId, String patientProfileId) async {
+  Future<Response> assignPatientToBed(
+    String roomId,
+    String bedId,
+    String patientProfileId,
+  ) async {
     // ✅ 수정된 엔드포인트: Django Nested Router 설정을 정확히 반영
-    final String endpoint = '/rooms/rooms/$roomId/beds/$bedId/'; // "rooms"가 두 번, bedId 포함
+    final String endpoint =
+        '/rooms/rooms/$roomId/beds/$bedId/'; // "rooms"가 두 번, bedId 포함
 
-    print('ApiService: Assigning patient $patientProfileId to bed $bedId in room $roomId at endpoint: $endpoint');
+    print(
+      'ApiService: Assigning patient $patientProfileId to bed $bedId in room $roomId at endpoint: $endpoint',
+    );
     return await _dio.patch(
       endpoint,
-      data: {'patient_id': patientProfileId}, // BedSerializer의 patient_id (source='patient') 필드 사용
+      data: {
+        'patient_id': patientProfileId,
+      }, // BedSerializer의 patient_id (source='patient') 필드 사용
     );
+  }
+
+  Future<List<ChatUser>> getUserListIncludingMe() async {
+    try {
+      List<ChatUser> allUsers = [];
+      String? nextUrl = '/users/';
+
+      String? currentUserId;
+
+      // accessToken에서 user_id 추출
+      final token = await _secureStorage.read(key: 'accessToken');
+      if (token != null) {
+        final parts = token.split('.');
+        if (parts.length == 3) {
+          final payload = base64.normalize(parts[1]);
+          final decoded = utf8.decode(base64Url.decode(payload));
+          final payloadData = json.decode(decoded);
+          currentUserId = payloadData['user_id'].toString();
+        }
+      }
+
+      while (nextUrl != null) {
+        final res = await _dio.get(nextUrl);
+        final results = res.data['results'] as List;
+        final users = results.map((json) => ChatUser.fromJson(json)).toList();
+        allUsers.addAll(users);
+
+        nextUrl = res.data['next']?.toString().replaceAll(
+          ApiService.apiBaseUrl,
+          '',
+        );
+      }
+
+      return allUsers.where((user) => user.id != currentUserId).toList();
+    } on DioException catch (e) {
+      print('❌ 사용자 전체 목록 오류: ${e.response?.data ?? e.message}');
+      rethrow;
+    }
   }
 
   Future<Response> dischargePatientFromBed(String roomId, String bedId) async {
     // ✅ 수정된 엔드포인트: Django Nested Router 설정을 정확히 반영
-    final String endpoint = '/rooms/rooms/$roomId/beds/$bedId/'; // "rooms"가 두 번, bedId 포함
-     print('ApiService: Discharging patient from bed $bedId in room $roomId at endpoint: $endpoint');
+    final String endpoint =
+        '/rooms/rooms/$roomId/beds/$bedId/'; // "rooms"가 두 번, bedId 포함
+    print(
+      'ApiService: Discharging patient from bed $bedId in room $roomId at endpoint: $endpoint',
+    );
     return await _dio.patch(
       endpoint,
       data: {'patient_id': null}, // patient_id를 null로 보내 환자 해제
@@ -240,7 +345,9 @@ class ApiService {
     // ✅ 수정된 엔드포인트: Django Nested Router 설정을 정확히 반영
     final String endpoint = '/rooms/rooms/$roomId/beds/'; // "rooms"가 두 번 들어갑니다.
 
-    print('ApiService: Creating bed in room $roomId at endpoint: $endpoint with patientId: $patientId');
+    print(
+      'ApiService: Creating bed in room $roomId at endpoint: $endpoint with patientId: $patientId',
+    );
     return await _dio.post(
       endpoint,
       data: {
@@ -259,7 +366,9 @@ class ApiService {
     // 만약 /api/v1/pacs/ct-studies/?patient_id={patient_profile_pk} 형태라면 아래처럼 수정
     // const String endpoint = '/pacs/ct-studies/';
     // return await _dio.get(endpoint, queryParameters: {'patient_id': patientProfilePk});
-    print('ApiService: Requesting CT studies for patient $patientProfilePk from: $endpoint'); // 로그 추가
+    print(
+      'ApiService: Requesting CT studies for patient $patientProfilePk from: $endpoint',
+    ); // 로그 추가
     return await _dio.get(endpoint);
   }
 }
