@@ -1,17 +1,38 @@
+// lib/screens/chat_room_screen.dart
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:hospital_management_app/models/user_model.dart'; // Ensure this path is correct
 import 'package:web_socket_channel/web_socket_channel.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
-import '../models/chat_user.dart';
-import '../models/message.dart';
-import '../providers/messenger_provider.dart';
-import '../providers/auth_provider.dart';
+import 'package:web_socket_channel/io.dart'; // For IOWebSocketChannel
+import 'dart:convert'; // For jsonEncode and jsonDecode
+
+// Define a message model if you haven't already
+class ChatMessage {
+  final String senderId;
+  final String receiverId;
+  final String text;
+  final DateTime timestamp;
+  final bool isMe;
+
+  ChatMessage({
+    required this.senderId,
+    required this.receiverId,
+    required this.text,
+    required this.timestamp,
+    required this.isMe,
+  });
+}
+
 
 class ChatRoomScreen extends StatefulWidget {
-  final ChatUser chatUser;
+  // Changed constructor to accept currentUser and peerUser
+  final User currentUser;
+  final User peerUser;
 
-  const ChatRoomScreen({super.key, required this.chatUser});
+  const ChatRoomScreen({
+    super.key,
+    required this.currentUser,
+    required this.peerUser,
+  });
 
   @override
   State<ChatRoomScreen> createState() => _ChatRoomScreenState();
@@ -20,239 +41,162 @@ class ChatRoomScreen extends StatefulWidget {
 class _ChatRoomScreenState extends State<ChatRoomScreen> {
   final TextEditingController _controller = TextEditingController();
   late final WebSocketChannel channel;
-  String? myId;
+  final List<ChatMessage> _messages = [];
 
   @override
   void initState() {
     super.initState();
+    // Replace with your actual WebSocket server URL
+    // The URL should uniquely identify the chat room, e.g., using user IDs
+    // Ensure user IDs are consistently ordered to avoid duplicate rooms (e.g., user1_user2 vs user2_user1)
+    String chatRoomId;
+    if (widget.currentUser.id.compareTo(widget.peerUser.id) < 0) {
+      chatRoomId = '${widget.currentUser.id}_${widget.peerUser.id}';
+    } else {
+      chatRoomId = '${widget.peerUser.id}_${widget.currentUser.id}';
+    }
+    // Example WebSocket URL: ws://YOUR_DJANGO_SERVER_IP_OR_DOMAIN/ws/chat/{chat_room_id}/
+    // Make sure your Django Channels routing is set up for this.
+    // For local development with Android emulator: 'ws://10.0.2.2:8000/ws/chat/$chatRoomId/'
+    final wsUrl = Uri.parse('ws://YOUR_DJANGO_WEBSOCKET_URL/ws/chat/$chatRoomId/?token=${widget.currentUser.id}'); // Example token, adjust as per your auth
+    
+    print("Connecting to WebSocket: $wsUrl");
 
-    final authProvider = Provider.of<AuthProvider>(context, listen: false);
-    myId = authProvider.user?['id']?.toString();
-    print('🪪 내 ID는: $myId');
+    channel = IOWebSocketChannel.connect(wsUrl);
 
-    final roomName =
-        myId!.compareTo(widget.chatUser.id.toString()) < 0
-            ? '${myId}_${widget.chatUser.id}'
-            : '${widget.chatUser.id}_${myId}';
-    print("🧩 WebSocket 방 이름: $roomName");
-
-    channel = WebSocketChannel.connect(
-      Uri.parse('ws://34.70.190.178:8001/ws/chat/$roomName/'),
+    channel.stream.listen(
+      (message) {
+        print("Received WebSocket message: $message");
+        try {
+          final decodedMessage = jsonDecode(message);
+          // Assuming the server sends messages in a specific format
+          // e.g., {"sender_id": "id1", "receiver_id": "id2", "text": "Hello"}
+          // You might need to adjust this based on your backend's message structure
+          if (decodedMessage is Map<String, dynamic> && decodedMessage.containsKey('text')) {
+             final senderId = decodedMessage['sender_id']?.toString() ?? widget.peerUser.id.toString(); // Fallback if sender_id is missing
+            setState(() {
+              _messages.insert(0, ChatMessage(
+                senderId: senderId,
+                receiverId: widget.currentUser.id.toString(), // Assuming message is for current user
+                text: decodedMessage['text'] as String,
+                timestamp: DateTime.now(),
+                isMe: senderId == widget.currentUser.id.toString(),
+              ));
+            });
+          }
+        } catch (e) {
+          print("Error decoding WebSocket message: $e");
+          // Handle non-JSON or malformed messages if necessary
+           setState(() {
+            _messages.insert(0, ChatMessage(
+              senderId: widget.peerUser.id.toString(), // Assume it's from peer if format is unknown
+              receiverId: widget.currentUser.id.toString(),
+              text: message, // Show raw message
+              timestamp: DateTime.now(),
+              isMe: false,
+            ));
+          });
+        }
+      },
+      onError: (error) {
+        print("WebSocket error: $error");
+        // Handle WebSocket errors (e.g., show a message to the user)
+      },
+      onDone: () {
+        print("WebSocket connection closed");
+        // Handle WebSocket connection closed (e.g., attempt to reconnect or notify user)
+      },
     );
-
-    channel.stream.listen((data) {
-      final decoded = json.decode(data);
-      final messageText = decoded['message'];
-      final senderId = decoded['sender'].toString();
-      final receiverId = decoded['receiver'].toString();
-
-      // 내 ID가 존재할 때만 처리
-      if (myId != null) {
-        // 대화 상대 ID 결정
-        final chatPartnerId = (myId == senderId) ? receiverId : senderId;
-
-        final message = Message(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          senderId: senderId,
-          content: messageText,
-          timestamp: DateTime.now(),
-        );
-
-        Provider.of<MessengerProvider>(
-          context,
-          listen: false,
-        ).addMessage(myId!, chatPartnerId, message);
-      }
-    });
-
-    // ✅ SharedPreferences에서 불러오기
-    Provider.of<MessengerProvider>(
-      context,
-      listen: false,
-    ).loadMessages(myId!, widget.chatUser.id).then((_) {
-      // 🔥 Django API에서도 추가로 불러오기
-      fetchMessagesFromServer();
-    });
   }
 
-  Future<void> fetchMessagesFromServer() async {
-    final authProvider = Provider.of<AuthProvider>(context, listen: false);
-    final token = authProvider.token;
-    final receiverId = widget.chatUser.id;
-
-    try {
-      final response = await http.get(
-        Uri.parse(
-          'http://34.70.190.178:8000/api/v1/messenger/history/${widget.chatUser.id}/',
-        ),
-        headers: {'Authorization': 'Bearer $token'},
-      );
-
-      if (response.statusCode == 200) {
-        final List<dynamic> messagesJson = json.decode(response.body);
-        final messages =
-            messagesJson
-                .map(
-                  (msg) => Message(
-                    id: msg['timestamp'],
-                    senderId: msg['sender'].toString(),
-                    content: msg['content'],
-                    timestamp: DateTime.parse(msg['timestamp']),
-                  ),
-                )
-                .toList();
-
-        final messengerProvider = Provider.of<MessengerProvider>(
-          context,
-          listen: false,
-        );
-        for (final msg in messages) {
-          messengerProvider.addMessage(myId!, receiverId, msg);
-        }
-      } else {
-        print('메시지 불러오기 실패: ${response.statusCode}');
-      }
-    } catch (e) {
-      print('메시지 불러오기 오류: $e');
+  void _sendMessage() {
+    if (_controller.text.isNotEmpty) {
+      final messageText = _controller.text;
+      // Construct the message payload as expected by your Django Channels consumer
+      final messagePayload = jsonEncode({
+        'text': messageText,
+        'sender_id': widget.currentUser.id.toString(), // Or however your backend identifies sender
+        'receiver_id': widget.peerUser.id.toString(), // Or however your backend identifies receiver
+      });
+      print("Sending WebSocket message: $messagePayload");
+      channel.sink.add(messagePayload);
+      
+      // Add message to local list immediately for better UX
+      // Backend should ideally echo the message back or send a confirmation
+      // setState(() {
+      //   _messages.insert(0, ChatMessage(
+      //     senderId: widget.currentUser.id.toString(),
+      //     receiverId: widget.peerUser.id.toString(),
+      //     text: messageText,
+      //     timestamp: DateTime.now(),
+      //     isMe: true,
+      //   ));
+      // });
+      _controller.clear();
     }
   }
 
   @override
   void dispose() {
-    channel.sink.close();
     _controller.dispose();
+    channel.sink.close();
     super.dispose();
-  }
-
-  void _sendMessage(BuildContext context) async {
-    final text = _controller.text.trim();
-    if (text.isNotEmpty && myId != null) {
-      final message = Message(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        senderId: myId!,
-        content: text,
-        timestamp: DateTime.now(),
-      );
-
-      // ① UI에 먼저 추가
-      Provider.of<MessengerProvider>(
-        context,
-        listen: false,
-      ).addMessage(myId!, widget.chatUser.id, message);
-
-      // ② WebSocket으로 전송
-      channel.sink.add(
-        json.encode({
-          'sender': myId,
-          'receiver': widget.chatUser.id,
-          'message': text,
-        }),
-      );
-
-      // ③ Django API로 저장 요청
-      final authProvider = Provider.of<AuthProvider>(context, listen: false);
-      final token = authProvider.token;
-
-      try {
-        final response = await http.post(
-          Uri.parse(
-            'http://34.70.190.178:8000/api/v1/messenger/history/${widget.chatUser.id}/',
-          ),
-          headers: {
-            'Authorization': 'Bearer $token',
-            'Content-Type': 'application/json',
-          },
-          body: json.encode({'content': text}),
-        );
-
-        if (response.statusCode == 201) {
-          print('✅ 메시지 저장 성공');
-        } else {
-          print('❌ 메시지 저장 실패: ${response.statusCode} / ${response.body}');
-        }
-      } catch (e) {
-        print('❌ 메시지 저장 중 오류: $e');
-      }
-
-      // ✅ try-catch 밖에서 호출
-      _resetInputField();
-    }
-  }
-
-  // ✅ sendMessage 함수 바깥에서 따로 정의!
-  void _resetInputField() {
-    _controller.clear();
-    FocusScope.of(context).requestFocus(FocusNode());
   }
 
   @override
   Widget build(BuildContext context) {
-    if (myId == null) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    }
-
     return Scaffold(
-      appBar: AppBar(title: Text(widget.chatUser.name)),
-      body: Consumer<MessengerProvider>(
-        builder: (context, messenger, child) {
-          final messages = messenger.getMessagesFor(myId!, widget.chatUser.id);
-
-          return Column(
-            children: [
-              Expanded(
-                child: ListView.builder(
-                  reverse: true,
-                  padding: const EdgeInsets.all(12),
-                  itemCount: messages.length,
-                  itemBuilder: (context, index) {
-                    final message = messages[messages.length - 1 - index];
-                    final isMe = message.senderId == myId;
-                    return Align(
-                      alignment:
-                          isMe ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Container(
-                        margin: const EdgeInsets.symmetric(vertical: 4),
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: isMe ? Colors.teal[100] : Colors.grey.shade300,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(message.content),
-                      ),
-                    );
-                  },
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                decoration: BoxDecoration(
-                  border: Border(top: BorderSide(color: Colors.grey.shade300)),
-                  color: Colors.white,
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _controller,
-                        decoration: const InputDecoration(
-                          hintText: '메시지를 입력하세요',
-                          border: InputBorder.none,
-                        ),
-                      ),
+      appBar: AppBar(
+        title: Text(widget.peerUser.username ?? widget.peerUser.email ?? 'Chat'),
+      ),
+      body: Column(
+        children: <Widget>[
+          Expanded(
+            child: ListView.builder(
+              reverse: true, // To show latest messages at the bottom
+              itemCount: _messages.length,
+              itemBuilder: (context, index) {
+                final message = _messages[index];
+                return Align(
+                  alignment: message.isMe ? Alignment.centerRight : Alignment.centerLeft,
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(vertical: 5, horizontal: 10),
+                    padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 15),
+                    decoration: BoxDecoration(
+                      color: message.isMe ? Theme.of(context).primaryColorLight : Colors.grey[300],
+                      borderRadius: BorderRadius.circular(15),
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.send, color: Colors.teal),
-                      onPressed: () => _sendMessage(context),
+                    child: Text(
+                      message.text,
+                      style: TextStyle(color: message.isMe ? Colors.black87 : Colors.black87),
                     ),
-                  ],
+                  ),
+                );
+              },
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    controller: _controller,
+                    decoration: const InputDecoration(
+                      hintText: '메시지 입력...',
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => _sendMessage(),
+                  ),
                 ),
-              ),
-            ],
-          );
-        },
+                IconButton(
+                  icon: const Icon(Icons.send),
+                  onPressed: _sendMessage,
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

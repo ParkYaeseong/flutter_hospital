@@ -1,128 +1,225 @@
 // lib/widgets/ct_study_list_widget.dart
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import 'package:dio/dio.dart';
-import 'package:url_launcher/url_launcher.dart'; // 외부 브라우저 실행 시 필요 (선택적)
-import '../services/api_service.dart';
-import '../models/ct_study_models.dart';
-import '../providers/auth_provider.dart';
-import '../screens/dicom_viewer_webview_screen.dart'; // WebView 화면 임포트
+import 'package:hospital_management_app/models/ct_study_models.dart';
+import 'package:hospital_management_app/services/api_service.dart';
+import 'package:hospital_management_app/screens/dicom_viewer_webview_screen.dart';
+import 'package:hospital_management_app/screens/ct_ai_result_screen.dart';
+// import 'package:dio/dio.dart'; // DioException을 사용하려면 필요할 수 있지만, ApiService에서 처리하므로 직접 필요 없을 수 있음
 
 class CtStudyListWidget extends StatefulWidget {
-  final String patientId; // 환자 ID (PatientProfile PK)
+  final String patientId; // PatientProfile의 PK (보통 UUID 문자열 또는 int)
 
-  const CtStudyListWidget({super.key, required this.patientId});
+  const CtStudyListWidget({Key? key, required this.patientId}) : super(key: key);
 
   @override
-  State<CtStudyListWidget> createState() => _CtStudyListWidgetState();
+  _CtStudyListWidgetState createState() => _CtStudyListWidgetState();
 }
 
 class _CtStudyListWidgetState extends State<CtStudyListWidget> {
+  late Future<CtStudiesResponse> _ctStudiesFuture;
   final ApiService _apiService = ApiService();
-  bool _isLoading = true;
-  List<CtStudy> _studies = [];
-  String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
-    _fetchCtStudies();
+    _loadCtStudies();
   }
 
-  // 환자 ID가 변경될 경우 데이터 다시 로드
-  @override
-  void didUpdateWidget(covariant CtStudyListWidget oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.patientId != oldWidget.patientId) {
-      _fetchCtStudies();
-    }
+  void _loadCtStudies() {
+    setState(() {
+      _ctStudiesFuture = _apiService.getCtStudiesForPatient(widget.patientId);
+    });
   }
 
-  Future<void> _fetchCtStudies() async {
-    final authProvider = Provider.of<AuthProvider>(context, listen: false);
-    if (!authProvider.isAuthenticated) {
-      setState(() { _isLoading = false; _errorMessage = "로그인이 필요합니다."; });
+  // DICOM 이미지 보기 함수
+  void _viewDicomImages(BuildContext context, CtStudy study) {
+    if (study.orthancStudyId == null || study.orthancStudyId!.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Orthanc 스터디 ID가 없어 DICOM 뷰어를 열 수 없습니다.')),
+      );
       return;
     }
-    setState(() { _isLoading = true; _errorMessage = null; });
 
-    try {
-      final response = await _apiService.getCtStudiesForPatient(widget.patientId);
-      if (response.statusCode == 200) {
-        final responseData = response.data;
-        List<dynamic> resultsList;
-         if (responseData is Map && responseData.containsKey('results')) {
-           resultsList = responseData['results'] as List<dynamic>;
-         } else if (responseData is List) {
-           resultsList = responseData;
-         } else { throw Exception('API 응답 형식이 올바르지 않습니다.'); }
+    // OHIF Viewer URL 구성 예시 (실제 Orthanc 및 WADO URL 설정에 맞게 수정 필요)
+    // ApiService.mediaBaseUrl 또는 다른 방식으로 Orthanc 서버 주소를 가져와야 합니다.
+    // 예시: final String orthancServerBaseUrl = 'http://YOUR_ORTHANC_IP_OR_DOMAIN:PORT';
+    // final String wadoRoot = '$orthancServerBaseUrl/wado'; // 실제 WADO root 경로
+    // final String dicomWebServerRoot = '$orthancServerBaseUrl/dicom-web'; // QIDO-RS, WADO-RS 등을 위함
 
-        setState(() {
-          _studies = resultsList.map((data) => CtStudy.fromJson(data as Map<String, dynamic>)).toList();
-          _isLoading = false;
-        });
-      } else {
-        throw DioException(requestOptions: response.requestOptions, response: response, message: 'Failed to load CT studies');
-      }
-    } catch (e) {
-      print("Fetch CT studies error: $e");
-      String detailMessage = "알 수 없는 오류";
-      if (e is DioException) { /* ... 오류 메시지 처리 ... */ }
-      else { detailMessage = e.toString(); }
-      if(mounted) setState(() { _errorMessage = "CT 목록 로딩 실패: $detailMessage"; _isLoading = false; });
-    }
-  }
+    // OHIF Viewer는 StudyInstanceUID를 직접 사용합니다.
+    // WADO URL은 Orthanc 설정에 따라 달라집니다.
+    // 일반적으로 Orthanc는 /wado 라는 경로로 WADO 서비스를 제공합니다.
+    // Django 서버를 통해 프록시하는 경우 해당 프록시 URL을 사용해야 합니다.
 
-  // --- OHIF 뷰어를 WebView로 여는 함수 ---
-  void _openDicomViewer(CtStudy study) {
-    // Orthanc DICOMweb WADO URL (환경 변수 또는 설정 파일 사용 권장)
-    const String orthancWadoUrl = 'http://34.70.190.178:8042/dicom-web'; // 실제 URL 확인!
+    // 여기서는 DicomViewerWebViewScreen이 study.orthancStudyId (Orthanc의 내부 ID)를
+    // 사용하여 내부적으로 OHIF URL을 구성한다고 가정합니다.
+    // 또는 study.studyInstanceUID를 전달하여 DicomViewerWebViewScreen에서 URL을 구성할 수도 있습니다.
+    // DicomViewerWebViewScreen 구현에 따라 전달할 값을 결정해야 합니다.
 
-    // 사용할 OHIF 뷰어 URL (자체 호스팅 또는 공개 데모)
-    // viewer.ohif.org는 StudyInstanceUIDs 파라미터를 사용합니다.
-    // 자체 호스팅 시에는 해당 뷰어의 URL 파라미터 규격 확인 필요
-    final String viewerUrl = 'https://viewer.ohif.org/viewer?StudyInstanceUIDs=${study.studyInstanceUid}&wadoURL=${Uri.encodeComponent(orthancWadoUrl)}';
+    // 현재 DicomViewerWebViewScreen은 studyInstanceUID를 받도록 되어있으므로,
+    // 해당 UID를 전달하고, DicomViewerWebViewScreen 내부에서 OHIF URL을 올바르게 생성해야 합니다.
+    // OHIF Viewer는 StudyInstanceUID를 직접 사용합니다.
+    // 예시 URL: https://viewer.ohif.org/viewer?StudyInstanceUIDs=STUDY_INSTANCE_UID
+    // 만약 자체 Orthanc + OHIF를 사용한다면 해당 URL로 변경.
 
-    print("Opening DICOM Viewer URL: $viewerUrl");
-
-    // DicomViewerWebViewScreen으로 URL 전달하며 이동
+    // 전달하는 ID가 Orthanc의 내부 ID인지, DICOM StudyInstanceUID인지 명확히 해야 합니다.
+    // Django API가 orthancStudyId를 반환한다면 이를 사용할 수 있습니다.
+    // 아니면 study.studyInstanceUID를 사용합니다.
+    // DicomViewerWebViewScreen에서 어떤 ID를 기대하는지 확인 필요.
+    // 여기서는 study.studyInstanceUID를 사용한다고 가정합니다.
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => DicomViewerWebViewScreen(initialUrl: viewerUrl),
+        builder: (context) => DicomViewerWebViewScreen(
+          studyInstanceUID: study.studyInstanceUID, // DICOM StudyInstanceUID 전달
+        ),
       ),
     );
   }
-  // ---------------------------------
+
+  // AI 분석 요청 함수
+  void _getAiAnalysis(BuildContext context, String studyInstanceUID) async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return const AlertDialog(
+          content: Row(
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(width: 20),
+              Text("AI 분석 중입니다..."),
+            ],
+          ),
+        );
+      },
+    );
+
+    try {
+      final result = await _apiService.predictCtByStudyUid(studyInstanceUID);
+      Navigator.pop(context); // 로딩 다이얼로그 닫기
+
+      if (result.errorMessage != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('AI 분석 오류: ${result.errorMessage}'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      } else if (result.overlayImageUrl != null || result.visualization3dHtmlUrl != null) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => CtAiResultScreen(
+              studyInstanceUID: studyInstanceUID,
+              overlayImageUrl: result.overlayImageUrl,
+              visualization3dHtmlUrl: result.visualization3dHtmlUrl,
+            ),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('AI 분석 결과를 받지 못했습니다 (이미지 및 3D 경로 없음).')),
+        );
+      }
+    } catch (e) { // ApiService에서 DioException을 일반 Exception으로 rethrow 할 수 있음
+      Navigator.pop(context); // 로딩 다이얼로그 닫기
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('AI 분석 요청 중 예외 발생: ${e.toString()}'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return const Padding(padding: EdgeInsets.all(16.0), child: Center(child: CircularProgressIndicator()));
-    }
-    if (_errorMessage != null) {
-      return Padding(padding: const EdgeInsets.all(16.0), child: Center(child: Text(_errorMessage!, style: const TextStyle(color: Colors.red))));
-    }
-    if (_studies.isEmpty) {
-      return const Padding(padding: EdgeInsets.all(16.0), child: Center(child: Text("해당 환자의 CT 검사 기록이 없습니다.")));
-    }
+    return FutureBuilder<CtStudiesResponse>(
+      future: _ctStudiesFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        } else if (snapshot.hasError) {
+          // ApiService에서 Exception으로 오류를 반환하므로, snapshot.error로 접근
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Text(
+                'CT 스터디 목록 로드 실패: ${snapshot.error}',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+          );
+        } else if (!snapshot.hasData || snapshot.data!.studies.isEmpty) {
+          // errorMessage가 있다면 그것을 먼저 표시
+          if (snapshot.data?.errorMessage != null) {
+             return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Text(
+                    'CT 스터디 목록 로드 오류: ${snapshot.data!.errorMessage}',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                ),
+              );
+          }
+          return const Center(child: Text('해당 환자에 대한 CT 스터디 정보가 없습니다.'));
+        }
 
-    // CT 스터디 목록 UI
-    return ListView.builder(
-      shrinkWrap: true, // 다른 스크롤 위젯 내부에 있을 경우
-      physics: const NeverScrollableScrollPhysics(), // 다른 스크롤 위젯 내부에 있을 경우
-      itemCount: _studies.length,
-      itemBuilder: (context, index) {
-        final study = _studies[index];
-        return Card(
-          margin: const EdgeInsets.symmetric(vertical: 4.0),
-          child: ListTile(
-            leading: const Icon(Icons.image_search, size: 30),
-            title: Text(study.studyDescription, style: const TextStyle(fontWeight: FontWeight.bold)),
-            subtitle: Text('검사일: ${study.studyDate} | 환자ID: ${study.patientId}'),
-            trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-            onTap: () => _openDicomViewer(study), // 탭하면 뷰어 열기
-          ),
+        // 정상적으로 데이터를 받았을 때
+        final ctStudiesResponse = snapshot.data!;
+        final studies = ctStudiesResponse.studies;
+
+        return ListView.builder(
+          itemCount: studies.length,
+          itemBuilder: (context, index) {
+            final study = studies[index];
+            return Card(
+              margin: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 16.0),
+              elevation: 2,
+              child: ListTile(
+                title: Text(
+                  study.studyDescription ?? '설명 없음',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('스터디 UID: ${study.studyInstanceUID}'),
+                    if (study.studyDate != null && study.studyDate!.isNotEmpty)
+                      Text('날짜: ${study.studyDate}'),
+                    Text('시리즈 수: ${study.seriesCount}'),
+                    if (study.orthancStudyId != null && study.orthancStudyId!.isNotEmpty)
+                      Text('Orthanc ID: ${study.orthancStudyId}'),
+                  ],
+                ),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.image_search, color: Colors.blueAccent),
+                      tooltip: 'DICOM 이미지 보기',
+                      // _viewDicomImages에 CtStudy 객체 전체를 전달
+                      onPressed: () => _viewDicomImages(context, study),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.insights, color: Colors.deepPurpleAccent),
+                      tooltip: 'AI 분석 결과 보기',
+                      // _getAiAnalysis에는 study.studyInstanceUID (String) 전달
+                      onPressed: () => _getAiAnalysis(context, study.studyInstanceUID),
+                    ),
+                  ],
+                ),
+                onTap: () {
+                  // 상세 정보 페이지로 이동하거나 다른 액션 수행 가능
+                  print("Tapped on study: ${study.studyInstanceUID}");
+                },
+              ),
+            );
+          },
         );
       },
     );
